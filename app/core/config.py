@@ -18,14 +18,20 @@ class Settings(BaseSettings):
         return v
     
     # Twitter API
-    TWITTER_API_KEY: str
-    TWITTER_API_SECRET: str
-    TWITTER_CALLBACK_URL: str = "http://localhost:8000/auth/twitter/callback"
+    TWITTER_CLIENT_ID: str
+    TWITTER_CLIENT_SECRET: str
+    TWITTER_CALLBACK_URL: str
+    TWITTER_SCOPE: str = 'tweet.read tweet.write users.read offline.access'
+    
+    # Twitter API Rate Limits (Essential tier)
+    TWITTER_MENTIONS_RATE_LIMIT: int = 50  # requests per window
+    TWITTER_MENTIONS_WINDOW: int = 15  # minutes
+    TWITTER_POLLING_INTERVAL: int = 5  # minutes between polls
     
     # Security
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
     
     # Environment
     ENVIRONMENT: str = "development"

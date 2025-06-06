@@ -6,7 +6,7 @@ from app.db.base import get_db
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import MessageCreate, MessageUpdate, MessageInDB
-import tweepy
+from app.services.twitter import TwitterService
 from datetime import datetime
 
 router = APIRouter()
@@ -67,14 +67,19 @@ async def reply_to_message(
                 detail="User not authenticated"
             )
         
-        # Create Twitter client
-        client = tweepy.Client(user.access_token)
+        # Create Twitter service
+        twitter_service = TwitterService(db)
+        
+        # Verify token and refresh if needed
+        if not await twitter_service.verify_token(user.access_token, user.token_expires_at):
+            if not await twitter_service.refresh_token(user):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Failed to refresh token"
+                )
         
         # Reply to the tweet
-        reply = client.create_tweet(
-            text=response,
-            in_reply_to_tweet_id=message_id
-        )
+        reply = await twitter_service.reply_to_tweet(user.access_token, message_id, response)
         
         # Update message in database
         message.status = "replied"
@@ -83,7 +88,7 @@ async def reply_to_message(
         
         return {
             "message": "Successfully replied to tweet",
-            "tweet_id": reply.data["id"]
+            "tweet_id": reply["data"]["id"]
         }
         
     except Exception as e:

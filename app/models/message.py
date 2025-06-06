@@ -6,11 +6,11 @@ from app.db.base import Base
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(String, primary_key=True)
+    id = Column(String(36), primary_key=True)
     timestamp = Column(DateTime, nullable=False)
-    user = Column(String, nullable=False)
+    user = Column(String(255), nullable=False)
     text = Column(Text, nullable=False)
-    status = Column(String, nullable=False, default="pending")
+    status = Column(String(50), nullable=False, default="pending")
     public_response = Column(Text)
     dm_response = Column(Text)
     credits_used = Column(Integer, default=0)

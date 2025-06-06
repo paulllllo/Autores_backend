@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.base import get_db
 from app.models.user import User
+from app.models.oauth_state import OAuthState
 from app.schemas.user import UserCreate, UserInDB
 import httpx
 import secrets
@@ -27,8 +29,8 @@ def generate_code_challenge(code_verifier):
     code_challenge = base64.urlsafe_b64encode(sha256_hash).decode('utf-8').rstrip('=')
     return code_challenge
 
-@router.post("/twitter/authorize")
-async def twitter_authorize():
+@router.get("/twitter/authorize")
+async def twitter_authorize(db: Session = Depends(get_db)):
     """
     Initiate Twitter OAuth 2.0 flow with PKCE
     """
@@ -36,16 +38,22 @@ async def twitter_authorize():
     code_verifier = generate_code_verifier()
     code_challenge = generate_code_challenge(code_verifier)
     
-    # Store code_verifier in session or database for later use
-    # For now, we'll store it in memory (in production, use secure session storage)
+    # Generate and store state
     state = secrets.token_urlsafe(16)
+    oauth_state = OAuthState(
+        state=state,
+        code_verifier=code_verifier,
+        created_at=datetime.utcnow()
+    )
+    db.add(oauth_state)
+    db.commit()
     
     # Construct authorization URL
     params = {
         'response_type': 'code',
-        'client_id': settings.TWITTER_API_KEY,
+        'client_id': settings.TWITTER_CLIENT_ID,
         'redirect_uri': settings.TWITTER_CALLBACK_URL,
-        'scope': 'tweet.read tweet.write users.read offline.access',
+        'scope': settings.TWITTER_SCOPE,
         'state': state,
         'code_challenge': code_challenge,
         'code_challenge_method': 'S256'
@@ -53,35 +61,58 @@ async def twitter_authorize():
     
     auth_url = f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}"
     
-    return {
-        "authorization_url": auth_url,
-        "code_verifier": code_verifier,  # In production, store this securely
-        "state": state
-    }
+    return RedirectResponse(auth_url)
 
 @router.get("/twitter/callback")
 async def twitter_callback(
     code: str,
     state: str,
-    code_verifier: str,
     db: Session = Depends(get_db)
 ):
     """
     Handle Twitter OAuth 2.0 callback
     """
     try:
+        # Retrieve stored state and code_verifier
+        oauth_state = db.query(OAuthState).filter(
+            OAuthState.state == state,
+            OAuthState.created_at > datetime.utcnow() - timedelta(minutes=10)
+        ).first()
+        
+        if not oauth_state:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired state"
+            )
+
+        print('code: ', code)
+        print('state: ', state)
+        print('oauth_state: ', oauth_state)
+        
         # Exchange code for access token
         async with httpx.AsyncClient() as client:
+            # Create Basic Auth header with client credentials
+            auth_string = f"{settings.TWITTER_CLIENT_ID}:{settings.TWITTER_CLIENT_SECRET}"
+            auth_bytes = auth_string.encode('ascii')
+            base64_auth = base64.b64encode(auth_bytes).decode('ascii')
+            headers = {
+                "Authorization": f"Basic {base64_auth}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            
             token_response = await client.post(
                 "https://api.twitter.com/2/oauth2/token",
+                headers=headers,
                 data={
                     "code": code,
                     "grant_type": "authorization_code",
-                    "client_id": settings.TWITTER_API_KEY,
+                    "client_id": settings.TWITTER_CLIENT_ID,
                     "redirect_uri": settings.TWITTER_CALLBACK_URL,
-                    "code_verifier": code_verifier
+                    "code_verifier": oauth_state.code_verifier
                 }
             )
+
+            print('token_response: ', token_response.json())
             
             if token_response.status_code != 200:
                 raise HTTPException(
@@ -104,6 +135,8 @@ async def twitter_callback(
                 )
             
             user_data = user_response.json()
+
+            print('user_data: ', user_data)
             
             # Create or update user in database
             db_user = db.query(User).filter(User.twitter_id == str(user_data['data']['id'])).first()
@@ -117,10 +150,12 @@ async def twitter_callback(
                 )
                 db.add(db_user)
             else:
-                db_user.access_token = token_data['access_token']
+                db_user.access_token = token_data.get('access_token')
                 db_user.refresh_token = token_data.get('refresh_token')
                 db_user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
             
+            # Clean up used state
+            db.delete(oauth_state)
             db.commit()
             
             return {
@@ -132,6 +167,7 @@ async def twitter_callback(
             }
             
     except Exception as e:
+        print('Error in twitter_callback:', str(e))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to authenticate with Twitter: {str(e)}"
@@ -159,7 +195,8 @@ async def refresh_token(
                 data={
                     "refresh_token": user.refresh_token,
                     "grant_type": "refresh_token",
-                    "client_id": settings.TWITTER_API_KEY
+                    "client_id": settings.TWITTER_CLIENT_ID,
+                    "client_secret": settings.TWITTER_CLIENT_SECRET
                 }
             )
             
