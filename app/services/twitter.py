@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.models.message import Message
 from app.models.user import User
 import uuid
+import base64
 
 
 class TwitterService:
@@ -37,13 +38,15 @@ class TwitterService:
         try:
             print('refreshing token...')
             async with httpx.AsyncClient() as client:
+                # Create Basic Auth header with client credentials
+                auth_header = f"Basic {base64.b64encode(f'{settings.TWITTER_CLIENT_ID}:{settings.TWITTER_CLIENT_SECRET}'.encode()).decode()}"
+                
                 response = await client.post(
                     "https://api.twitter.com/2/oauth2/token",
+                    headers={"Authorization": auth_header},
                     data={
                         "refresh_token": user.refresh_token,
-                        "grant_type": "refresh_token",
-                        "client_id": settings.TWITTER_CLIENT_ID,
-                        "client_secret": settings.TWITTER_CLIENT_SECRET
+                        "grant_type": "refresh_token"
                     }
                 )
 
