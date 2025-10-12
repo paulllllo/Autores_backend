@@ -14,6 +14,7 @@ import hashlib
 import uuid
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
+import asyncio
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -72,6 +73,8 @@ async def twitter_callback(
     """
     Handle Twitter OAuth 2.0 callback
     """
+
+    print('called back...')
     try:
         # Retrieve stored state and code_verifier
         oauth_state = db.query(OAuthState).filter(
@@ -122,11 +125,11 @@ async def twitter_callback(
             
             token_data = token_response.json()
             
-            # Get user info
-            user_response = await client.get(
-                "https://api.twitter.com/2/users/me",
-                headers={"Authorization": f"Bearer {token_data['access_token']}"}
-            )
+            print('getting user info... ')
+            # Get user info with retry
+            user_response = await get_user_info_with_retry(client, token_data['access_token'])
+
+            print('user_response: ', user_response)
             
             if user_response.status_code != 200:
                 raise HTTPException(
@@ -173,6 +176,26 @@ async def twitter_callback(
             detail=f"Failed to authenticate with Twitter: {str(e)}"
         )
 
+async def get_user_info_with_retry(client, token, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            response = await client.get(
+                "https://api.twitter.com/2/users/me",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+
+            print('response in get user info: ', response)
+
+            if response.status_code == 429:
+                wait_time = 2 ** attempt  # Exponential backoff
+                await asyncio.sleep(wait_time)
+                continue
+            return response
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            await asyncio.sleep(2 ** attempt)
+
 @router.post("/refresh")
 async def refresh_token(
     user_id: str,
@@ -190,13 +213,15 @@ async def refresh_token(
             )
         
         async with httpx.AsyncClient() as client:
+            # Create Basic Auth header with client credentials
+            auth_header = f"Basic {base64.b64encode(f'{settings.TWITTER_CLIENT_ID}:{settings.TWITTER_CLIENT_SECRET}'.encode()).decode()}"
+            
             response = await client.post(
                 "https://api.twitter.com/2/oauth2/token",
+                headers={"Authorization": auth_header},
                 data={
                     "refresh_token": user.refresh_token,
-                    "grant_type": "refresh_token",
-                    "client_id": settings.TWITTER_CLIENT_ID,
-                    "client_secret": settings.TWITTER_CLIENT_SECRET
+                    "grant_type": "refresh_token"
                 }
             )
             

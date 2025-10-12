@@ -24,6 +24,7 @@ wheels/
 venv/
 ENV/
 .venv/
+.venv/*
 
 # IDE
 .idea/
@@ -43,6 +44,7 @@ ENV/
 *.db
 *.sqlite3
 
+
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db

@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     TWITTER_CLIENT_ID: str
     TWITTER_CLIENT_SECRET: str
     TWITTER_CALLBACK_URL: str
-    TWITTER_SCOPE: str = 'tweet.read tweet.write users.read offline.access'
+    TWITTER_SCOPE: str = 'tweet.read tweet.write users.read offline.access dm.write'
     
     # Twitter API Rate Limits (Essential tier)
     TWITTER_MENTIONS_RATE_LIMIT: int = 50  # requests per window

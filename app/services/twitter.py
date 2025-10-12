@@ -150,4 +150,33 @@ class TwitterService:
                 return response.json()
                 
         except Exception as e:
-            raise Exception(f"Failed to reply to tweet: {str(e)}") 
+            raise Exception(f"Failed to reply to tweet: {str(e)}")
+
+    async def send_dm(self, access_token: str, recipient_id: str, text: str) -> dict:
+        """
+        Send a direct message to a Twitter user using Twitter API v2
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                # First, create a DM conversation
+                response = await client.post(
+                    f"https://api.twitter.com/2/dm_conversations/with/{recipient_id}/messages",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "text": text
+                    }
+                )
+
+                print('response in send_dm', response.json())
+                
+                if response.status_code != 201:
+                    error_msg = response.json().get('detail', 'Unknown error')
+                    raise Exception(f"Failed to send DM: {error_msg}")
+                
+                return response.json()
+                
+        except Exception as e:
+            raise Exception(f"Failed to send DM: {str(e)}") 

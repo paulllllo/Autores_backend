@@ -21,7 +21,7 @@ A FastAPI-based backend service that enables users to fetch, store, and respond 
 1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd twitter-mentions-api
+cd twitter-mentions-api<backend name>
 ```
 
 2. Create and activate virtual environment:
