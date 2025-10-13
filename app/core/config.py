@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     TWITTER_MENTIONS_WINDOW: int = 15  # minutes
     TWITTER_POLLING_INTERVAL: int = 5  # minutes between polls
     
+    # OpenAI API
+    OPENAI_API_KEY: str
+    
     # Security
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

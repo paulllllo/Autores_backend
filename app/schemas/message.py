@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 
 
@@ -32,4 +32,21 @@ class MessageInDB(MessageBase):
     updated_at: datetime
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+
+
+class FetchMessagesResponse(BaseModel):
+    message: str
+    new_messages_count: int
+    messages: List[MessageInDB]
+
+
+class GenerateResponseRequest(BaseModel):
+    custom_prompt: Optional[str] = None
+
+
+class GenerateResponseResponse(BaseModel):
+    message_id: str
+    original_message: str
+    generated_response: str
+    custom_prompt_used: bool 

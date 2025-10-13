@@ -5,8 +5,9 @@ from app.core.config import settings
 from app.db.base import get_db
 from app.models.message import Message
 from app.models.user import User
-from app.schemas.message import MessageCreate, MessageUpdate, MessageInDB
+from app.schemas.message import MessageCreate, MessageUpdate, MessageInDB, FetchMessagesResponse, GenerateResponseRequest, GenerateResponseResponse
 from app.services.twitter import TwitterService
+from app.services.ai_service import AIService
 from datetime import datetime
 from sqlalchemy import desc
 
@@ -202,4 +203,79 @@ async def delete_message(
     db.delete(message)
     db.commit()
     
-    return {"message": "Message successfully deleted"} 
+    return {"message": "Message successfully deleted"}
+
+
+@router.post("/fetch-new", response_model=FetchMessagesResponse)
+async def fetch_new_messages(
+    db: Session = Depends(get_db)
+):
+    """
+    Fetch new mentions from Twitter for the current user
+    """
+    try:
+        # Get the current user
+        user = db.query(User).first()  # In a real app, you'd get the specific authenticated user
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not authenticated"
+            )
+        
+        # Create Twitter service
+        twitter_service = TwitterService(db)
+        
+        # Fetch new mentions
+        new_messages = await twitter_service.fetch_mentions(user)
+        
+        return FetchMessagesResponse(
+            message=f"Successfully fetched {len(new_messages)} new messages",
+            new_messages_count=len(new_messages),
+            messages=new_messages
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch new messages: {str(e)}"
+        )
+
+
+@router.post("/{message_id}/generate-response", response_model=GenerateResponseResponse)
+async def generate_ai_response(
+    message_id: str,
+    request: GenerateResponseRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Generate an AI response for a given message
+    """
+    message = db.query(Message).filter(Message.id == message_id).first()
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Message not found"
+        )
+    
+    try:
+        # Create AI service
+        ai_service = AIService()
+        
+        # Generate response
+        if request.custom_prompt:
+            generated_response = await ai_service.generate_custom_response(message.text, request.custom_prompt)
+        else:
+            generated_response = await ai_service.generate_response(message)
+        
+        return GenerateResponseResponse(
+            message_id=message_id,
+            original_message=message.text,
+            generated_response=generated_response,
+            custom_prompt_used=request.custom_prompt is not None
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to generate AI response: {str(e)}"
+        ) 
