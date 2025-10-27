@@ -1,13 +1,15 @@
 import httpx
 from app.core.config import settings
 from app.models.message import Message
+from app.services.twitter import TwitterService
 
 
 class AIService:
     def __init__(self):
         self.api_key = settings.OPENAI_API_KEY
         self.base_url = "https://api.openai.com/v1"
-    
+        self.twitter = TwitterService()  # ✅ Initialize Twitter service
+
     async def generate_response(self, message: Message, custom_prompt: str = None) -> str:
         """
         Generate an AI response for a given message using OpenAI GPT-4
@@ -101,3 +103,55 @@ Generate a professional response:"""
                 
         except Exception as e:
             raise Exception(f"Failed to generate custom AI response: {str(e)}")
+
+    # 🧠 NEW: Handle Twitter mentions automatically
+    async def handle_twitter_mention(self, access_token: str, mention):
+        """
+        Fetch conversation context, generate an AI response, and reply to the mention.
+        """
+        try:
+            # 1️⃣ Fetch conversation context (the thread memory)
+            context = await self.twitter.fetch_conversation_context(
+                access_token,
+                conversation_id=mention["conversation_id"]
+            )
+
+            # Combine all previous messages with the current one
+            full_context = "\n".join(context + [mention["text"]])
+
+            # 2️⃣ Send the entire context to GPT
+            prompt = f"""
+You are an AI social media assistant replying to a mention in a conversation thread.
+
+Here’s the full thread context:
+{full_context}
+
+Respond naturally to the latest message (the last one). Be concise (under 280 chars) and keep a friendly, professional tone.
+"""
+            response = await self.generate_custom_response(
+                message_text=mention["text"],
+                custom_prompt=prompt
+            )
+
+            # 3️⃣ Reply back on Twitter
+            await self.twitter.reply_to_tweet(
+                access_token,
+                tweet_id=mention["id"],
+                text=response
+            )
+
+            print(f"✅ Responded to mention @{mention['author_id']} with: {response}")
+            return response
+
+        except Exception as e:
+            print(f"❌ Error handling mention: {e}")
+            return None
+
+    # 🌀 Optional: Automatically handle all mentions
+    async def handle_all_mentions(self, access_token: str):
+        """
+        Fetch all new mentions and reply intelligently to each.
+        """
+        mentions = await self.twitter.fetch_mentions(access_token)
+        for mention in mentions:
+            await self.handle_twitter_mention(access_token, mention)

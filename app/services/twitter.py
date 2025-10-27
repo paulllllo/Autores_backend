@@ -126,6 +126,37 @@ class TwitterService:
         except Exception as e:
             self.db.rollback()
             raise Exception(f"Failed to fetch mentions: {str(e)}")
+
+    async def fetch_conversation_context(self, access_token: str, conversation_id: str) -> list[str]:
+        """
+        Fetch the full conversation thread for a given conversation_id.
+        This gives context for what was discussed before the mention.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.twitter.com/2/tweets/search/recent",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={
+                        "query": f"conversation_id:{conversation_id}",
+                        "tweet.fields": "author_id,created_at,text,in_reply_to_user_id",
+                        "max_results": 50
+                    }
+                )
+
+                if response.status_code != 200:
+                    print("Error fetching context:", response.text)
+                    return []
+
+                tweets = response.json().get("data", [])
+                # Sort by creation time so context flows naturally
+                tweets.sort(key=lambda x: x["created_at"])
+                return [t["text"] for t in tweets]
+
+        except Exception as e:
+            print(f"Error in fetch_conversation_context: {e}")
+            return []
+     
     
     async def reply_to_tweet(self, access_token: str, tweet_id: str, text: str) -> dict:
         """
