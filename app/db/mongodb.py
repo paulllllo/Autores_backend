@@ -1,0 +1,47 @@
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+from app.core.config import settings
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class MongoDB:
+    client: AsyncIOMotorClient = None
+
+
+mongodb = MongoDB()
+
+
+async def connect_to_mongodb():
+    """Initialize MongoDB connection and Beanie ODM"""
+    try:
+        logger.info("Connecting to MongoDB...")
+        mongodb.client = AsyncIOMotorClient(settings.MONGODB_URL)
+        
+        # Import all document models
+        from app.models.user import User
+        from app.models.message import Message
+        from app.models.oauth_state import OAuthState
+        
+        # Initialize Beanie with document models
+        await init_beanie(
+            database=mongodb.client[settings.MONGODB_DB_NAME],
+            document_models=[User, Message, OAuthState]
+        )
+        
+        logger.info("Successfully connected to MongoDB")
+    except Exception as e:
+        logger.error(f"Error connecting to MongoDB: {e}")
+        raise
+
+
+async def close_mongodb_connection():
+    """Close MongoDB connection"""
+    try:
+        if mongodb.client:
+            mongodb.client.close()
+            logger.info("MongoDB connection closed")
+    except Exception as e:
+        logger.error(f"Error closing MongoDB connection: {e}")
+

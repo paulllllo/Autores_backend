@@ -8,13 +8,14 @@ class Settings(BaseSettings):
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api/v1"
     
-    # Database
-    DATABASE_URL: str
+    # MongoDB Database
+    MONGODB_URL: str
+    MONGODB_DB_NAME: str = "autores_db"
     
-    @validator("DATABASE_URL", pre=True)
-    def validate_database_url(cls, v: str) -> str:
-        if not v.startswith("mysql+pymysql://"):
-            raise ValueError("DATABASE_URL must start with mysql+pymysql://")
+    @validator("MONGODB_URL", pre=True)
+    def validate_mongodb_url(cls, v: str) -> str:
+        if not v.startswith("mongodb"):
+            raise ValueError("MONGODB_URL must start with mongodb:// or mongodb+srv://")
         return v
     
     # Twitter API

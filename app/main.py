@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1.api import api_router
 from app.services.scheduler import scheduler_service
+from app.db.mongodb import connect_to_mongodb, close_mongodb_connection
 from contextlib import asynccontextmanager
 import logging
 import uvicorn
@@ -11,15 +12,24 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Start the scheduler service
+    # Startup
     logger.info("Starting application...")
+    
+    # Connect to MongoDB
+    await connect_to_mongodb()
+    logger.info("MongoDB connected successfully")
+    
+    # Start the scheduler service
     scheduler_service.start_polling()
     logger.info("Scheduler started successfully")
+    
     yield
-    # Shutdown: Stop the scheduler service
+    
+    # Shutdown
     logger.info("Shutting down application...")
     scheduler_service.scheduler.shutdown()
-    logger.info("Scheduler shut down successfully")
+    await close_mongodb_connection()
+    logger.info("Application shut down successfully")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

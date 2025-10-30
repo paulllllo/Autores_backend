@@ -1,15 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
 from typing import List
 from app.core.config import settings
-from app.db.base import get_db
 from app.models.message import Message
 from app.models.user import User
 from app.schemas.message import MessageCreate, MessageUpdate, MessageInDB, FetchMessagesResponse, GenerateResponseRequest, GenerateResponseResponse
 from app.services.twitter import TwitterService
 from app.services.ai_service import AIService
 from datetime import datetime
-from sqlalchemy import desc
 
 router = APIRouter()
 
@@ -17,25 +14,23 @@ router = APIRouter()
 @router.get("/", response_model=List[MessageInDB])
 async def get_messages(
     skip: int = 0,
-    limit: int = 100,
-    db: Session = Depends(get_db)
+    limit: int = 100
 ):
     """
     Get all messages from the database, sorted by timestamp (newest first)
     """
-    messages = db.query(Message).order_by(desc(Message.timestamp)).offset(skip).limit(limit).all()
+    messages = await Message.find().sort(-Message.timestamp).skip(skip).limit(limit).to_list()
     return messages
 
 
 @router.get("/{message_id}", response_model=MessageInDB)
 async def get_message(
-    message_id: str,
-    db: Session = Depends(get_db)
+    message_id: str
 ):
     """
     Get a specific message by ID
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -47,13 +42,12 @@ async def get_message(
 @router.post("/{message_id}/reply")
 async def reply_to_message(
     message_id: str,
-    response: str,
-    db: Session = Depends(get_db)
+    response: str
 ):
     """
     Reply to a Twitter mention
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -62,7 +56,7 @@ async def reply_to_message(
     
     try:
         # Get user's access token
-        user = db.query(User).first()  # In a real app, you'd get the specific user
+        user = await User.find_one()  # In a real app, you'd get the specific user
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -70,7 +64,7 @@ async def reply_to_message(
             )
         
         # Create Twitter service
-        twitter_service = TwitterService(db)
+        twitter_service = TwitterService()
         
         # Verify token and refresh if needed
         if not await twitter_service.verify_token(user.access_token, user.token_expires_at):
@@ -86,8 +80,7 @@ async def reply_to_message(
         # Update message in database
         message.status = "replied"
         message.public_response = response
-        db.commit()
-        db.refresh(message)
+        await message.save()
         
         return message
         
@@ -100,13 +93,12 @@ async def reply_to_message(
 @router.patch("/{message_id}", response_model=MessageInDB)
 async def update_message(
     message_id: str,
-    message_update: MessageUpdate,
-    db: Session = Depends(get_db)
+    message_update: MessageUpdate
 ):
     """
     Update a message's status, public response, or DM response
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -121,20 +113,18 @@ async def update_message(
     if message_update.dm_response is not None:
         message.dm_response = message_update.dm_response
     
-    db.commit()
-    db.refresh(message)
+    await message.save()
     return message
 
 @router.post("/{message_id}/dm-reply")
 async def reply_to_dm(
     message_id: str,
-    response: str,
-    db: Session = Depends(get_db)
+    response: str
 ):
     """
     Send a DM response to a user
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -143,7 +133,7 @@ async def reply_to_dm(
     
     try:
         # Get user's access token
-        user = db.query(User).first()  # In a real app, you'd get the specific user
+        user = await User.find_one()  # In a real app, you'd get the specific user
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -151,7 +141,7 @@ async def reply_to_dm(
             )
         
         # Create Twitter service
-        twitter_service = TwitterService(db)
+        twitter_service = TwitterService()
         
         # Verify token and refresh if needed
         if not await twitter_service.verify_token(user.access_token, user.token_expires_at):
@@ -174,8 +164,7 @@ async def reply_to_dm(
         
         # Update message in database
         message.dm_response = response
-        db.commit()
-        db.refresh(message)
+        await message.save()
         
         return message
         
@@ -187,35 +176,31 @@ async def reply_to_dm(
 
 @router.delete("/{message_id}")
 async def delete_message(
-    message_id: str,
-    db: Session = Depends(get_db)
+    message_id: str
 ):
     """
     Delete a message
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Message not found"
         )
     
-    db.delete(message)
-    db.commit()
+    await message.delete()
     
     return {"message": "Message successfully deleted"}
 
 
 @router.post("/fetch-new", response_model=FetchMessagesResponse)
-async def fetch_new_messages(
-    db: Session = Depends(get_db)
-):
+async def fetch_new_messages():
     """
     Fetch new mentions from Twitter for the current user
     """
     try:
         # Get the current user
-        user = db.query(User).first()  # In a real app, you'd get the specific authenticated user
+        user = await User.find_one()  # In a real app, you'd get the specific authenticated user
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -223,7 +208,7 @@ async def fetch_new_messages(
             )
         
         # Create Twitter service
-        twitter_service = TwitterService(db)
+        twitter_service = TwitterService()
         
         # Fetch new mentions
         new_messages = await twitter_service.fetch_mentions(user)
@@ -244,13 +229,12 @@ async def fetch_new_messages(
 @router.post("/{message_id}/generate-response", response_model=GenerateResponseResponse)
 async def generate_ai_response(
     message_id: str,
-    request: GenerateResponseRequest,
-    db: Session = Depends(get_db)
+    request: GenerateResponseRequest
 ):
     """
     Generate an AI response for a given message
     """
-    message = db.query(Message).filter(Message.id == message_id).first()
+    message = await Message.find_one(Message.id == message_id)
     if not message:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

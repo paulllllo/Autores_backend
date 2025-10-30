@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 import httpx
-from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.message import Message
 from app.models.user import User
@@ -9,8 +8,8 @@ import base64
 
 
 class TwitterService:
-    def __init__(self, db: Session):
-        self.db = db
+    def __init__(self):
+        pass
     
     async def verify_token(self, access_token: str, token_expires_at: datetime) -> bool:
         """
@@ -61,9 +60,8 @@ class TwitterService:
                 user.access_token = token_data['access_token']
                 user.refresh_token = token_data.get('refresh_token', user.refresh_token)
                 user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
-                # user.token_expires_at = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
                 
-                self.db.commit()
+                await user.save()
                 return True
                 
         except Exception:
@@ -104,9 +102,7 @@ class TwitterService:
                 
                 for mention in mentions_data.get('data', []):
                     # Check if message already exists
-                    existing_message = self.db.query(Message).filter(
-                        Message.id == str(mention['id'])
-                    ).first()
+                    existing_message = await Message.find_one(Message.id == str(mention['id']))
                     
                     if not existing_message:
                         # Create new message
@@ -117,14 +113,12 @@ class TwitterService:
                             text=mention['text'],
                             status="pending"
                         )
-                        self.db.add(message)
+                        await message.insert()
                         new_messages.append(message)
                 
-                self.db.commit()
                 return new_messages
                 
         except Exception as e:
-            self.db.rollback()
             raise Exception(f"Failed to fetch mentions: {str(e)}")
     
     async def reply_to_tweet(self, access_token: str, tweet_id: str, text: str) -> dict:

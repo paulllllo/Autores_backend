@@ -1,9 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.db.base import get_db
 from app.models.user import User
 from app.models.oauth_state import OAuthState
 from app.schemas.user import UserCreate, UserInDB
@@ -31,7 +29,7 @@ def generate_code_challenge(code_verifier):
     return code_challenge
 
 @router.get("/twitter/authorize")
-async def twitter_authorize(db: Session = Depends(get_db)):
+async def twitter_authorize():
     """
     Initiate Twitter OAuth 2.0 flow with PKCE
     """
@@ -46,8 +44,7 @@ async def twitter_authorize(db: Session = Depends(get_db)):
         code_verifier=code_verifier,
         created_at=datetime.utcnow()
     )
-    db.add(oauth_state)
-    db.commit()
+    await oauth_state.insert()
     
     # Construct authorization URL
     params = {
@@ -67,8 +64,7 @@ async def twitter_authorize(db: Session = Depends(get_db)):
 @router.get("/twitter/callback")
 async def twitter_callback(
     code: str,
-    state: str,
-    db: Session = Depends(get_db)
+    state: str
 ):
     """
     Handle Twitter OAuth 2.0 callback
@@ -77,10 +73,10 @@ async def twitter_callback(
     print('called back...')
     try:
         # Retrieve stored state and code_verifier
-        oauth_state = db.query(OAuthState).filter(
+        oauth_state = await OAuthState.find_one(
             OAuthState.state == state,
             OAuthState.created_at > datetime.utcnow() - timedelta(minutes=10)
-        ).first()
+        )
         
         if not oauth_state:
             raise HTTPException(
@@ -142,7 +138,7 @@ async def twitter_callback(
             print('user_data: ', user_data)
             
             # Create or update user in database
-            db_user = db.query(User).filter(User.twitter_id == str(user_data['data']['id'])).first()
+            db_user = await User.find_one(User.twitter_id == str(user_data['data']['id']))
             if not db_user:
                 db_user = User(
                     id=str(uuid.uuid4()),
@@ -151,15 +147,15 @@ async def twitter_callback(
                     refresh_token=token_data.get('refresh_token'),
                     token_expires_at=datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
                 )
-                db.add(db_user)
+                await db_user.insert()
             else:
                 db_user.access_token = token_data.get('access_token')
                 db_user.refresh_token = token_data.get('refresh_token')
                 db_user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+                await db_user.save()
             
             # Clean up used state
-            db.delete(oauth_state)
-            db.commit()
+            await oauth_state.delete()
             
             return {
                 "message": "Successfully authenticated with Twitter",
@@ -198,14 +194,13 @@ async def get_user_info_with_retry(client, token, max_retries=3):
 
 @router.post("/refresh")
 async def refresh_token(
-    user_id: str,
-    db: Session = Depends(get_db)
+    user_id: str
 ):
     """
     Refresh Twitter access token
     """
     try:
-        user = db.query(User).filter(User.id == user_id).first()
+        user = await User.find_one(User.id == user_id)
         if not user or not user.refresh_token:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -238,7 +233,7 @@ async def refresh_token(
             user.refresh_token = token_data.get('refresh_token', user.refresh_token)
             user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
             
-            db.commit()
+            await user.save()
             
             return {
                 "message": "Successfully refreshed token",

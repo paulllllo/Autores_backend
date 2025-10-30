@@ -1,11 +1,16 @@
-from sqlalchemy import Column, String, DateTime
-from sqlalchemy.sql import func
-from app.db.base_class import Base
+from beanie import Document, Indexed
+from datetime import datetime
+from pydantic import Field
 
 
-class OAuthState(Base):
-    __tablename__ = "oauth_states"
-
-    state = Column(String(255), primary_key=True)
-    code_verifier = Column(String(255), nullable=False)
-    created_at = Column(DateTime, nullable=False)
+class OAuthState(Document):
+    state: Indexed(str, unique=True)
+    code_verifier: str
+    created_at: datetime
+    
+    class Settings:
+        name = "oauth_states"
+        indexes = [
+            "state",
+            "created_at",
+        ]

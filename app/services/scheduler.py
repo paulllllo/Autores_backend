@@ -1,7 +1,5 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy.orm import Session
-from app.db.base import SessionLocal
 from app.models.user import User
 from app.services.twitter import TwitterService
 from app.core.config import settings
@@ -52,14 +50,13 @@ class SchedulerService:
         Poll for new mentions for all users
         """
         logger.info("Polling for mentions")
-        db = SessionLocal()
         try:
-            users = db.query(User).all()
+            users = await User.find_all().to_list()
             if not users:
                 logger.info("No users found in database")
                 return
                 
-            twitter_service = TwitterService(db)
+            twitter_service = TwitterService()
             
             for user in users:
                 try:
@@ -79,22 +76,21 @@ class SchedulerService:
                         logger.warning("Rate limit reached, stopping polling for this cycle")
                         break
         
-        finally:
-            db.close()
+        except Exception as e:
+            logger.error(f"Error in poll_mentions: {str(e)}")
     
     async def refresh_tokens(self):
         """
         Refresh tokens for all users
         """
         logger.info("Refreshing tokens")
-        db = SessionLocal()
         try:
-            users = db.query(User).all()
+            users = await User.find_all().to_list()
             if not users:
                 logger.info("No users found in database")
                 return
                 
-            twitter_service = TwitterService(db)
+            twitter_service = TwitterService()
             
             for user in users:
                 try:
@@ -105,8 +101,8 @@ class SchedulerService:
                 except Exception as e:
                     logger.error(f"Error refreshing token for user {user.twitter_id}: {str(e)}")
         
-        finally:
-            db.close()
+        except Exception as e:
+            logger.error(f"Error in refresh_tokens: {str(e)}")
 
 
 scheduler_service = SchedulerService() 

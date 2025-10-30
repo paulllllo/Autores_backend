@@ -38,7 +38,12 @@ pip install -r requirements.txt
 4. Create a `.env` file in the root directory with the following variables:
 ```env
 # Database
-DATABASE_URL=postgresql://user:password@localhost:5432/twitter_mentions
+MONGODB_URL=mongodb_url
+
+MONGODB_DB_NAME=db_name
+
+# OpenAI API key
+OPENAI_API_KEY=openAI_key
 
 # Twitter API
 TWITTER_API_KEY=your_api_key
