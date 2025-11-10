@@ -6,12 +6,13 @@ from app.models.message import Message
 from app.models.user import User
 import uuid
 import base64
+from app.services.ai_service import AIService
 
 
 class TwitterService:
     def __init__(self, db: Session):
         self.db = db
-    
+
     async def verify_token(self, access_token: str, token_expires_at: datetime) -> bool:
         """
         Verify if the access token is still valid
@@ -30,7 +31,7 @@ class TwitterService:
                 return response.status_code == 200
         except Exception:
             return False
-    
+
     async def refresh_token(self, user: User) -> bool:
         """
         Refresh the user's Twitter access token
@@ -40,7 +41,7 @@ class TwitterService:
             async with httpx.AsyncClient() as client:
                 # Create Basic Auth header with client credentials
                 auth_header = f"Basic {base64.b64encode(f'{settings.TWITTER_CLIENT_ID}:{settings.TWITTER_CLIENT_SECRET}'.encode()).decode()}"
-                
+
                 response = await client.post(
                     "https://api.twitter.com/2/oauth2/token",
                     headers={"Authorization": auth_header},
@@ -56,7 +57,7 @@ class TwitterService:
                     return False
                 
                 token_data = response.json()
-                
+        
                 # Update user's tokens with expiration based on time from twitter
                 user.access_token = token_data['access_token']
                 user.refresh_token = token_data.get('refresh_token', user.refresh_token)
@@ -65,67 +66,93 @@ class TwitterService:
                 
                 self.db.commit()
                 return True
-                
         except Exception:
             return False
-    
+
+            
     async def fetch_mentions(self, user: User) -> list[Message]:
         """
         Fetch new mentions for a user and store them in the database
         """
         try:
             # Verify token and refresh if needed
-            if not await self.verify_token(user.access_token, user.token_expires_at):
-                if not await self.refresh_token(user):
-                    raise Exception("Failed to refresh token")
+            await self._ensure_valid_token(user)
 
+            # Get user's mentions
+            mentions_data = await self._fetch_mentions_from_twitter(user)
 
-            print('user.twitter_id: ', user.twitter_id)
-            print('user.access_token: ', user.access_token)
-            
-            async with httpx.AsyncClient() as client:
-                # Get user's mentions
-                response = await client.get(
-                    f"https://api.twitter.com/2/users/{user.twitter_id}/mentions",
-                    headers={"Authorization": f"Bearer {user.access_token}"},
-                    params={
-                        "max_results": 100,
-                        "tweet.fields": "created_at,author_id,text"
-                    }
-                )
+            # Process mentions and save to database
+            new_messages = self._process_mentions(mentions_data)
 
-                print('response: ', response.json())
-                
-                if response.status_code != 200:
-                    raise Exception("Failed to fetch mentions", response.json())
-                
-                mentions_data = response.json()
-                new_messages = []
-                
-                for mention in mentions_data.get('data', []):
-                    # Check if message already exists
-                    existing_message = self.db.query(Message).filter(
-                        Message.id == str(mention['id'])
-                    ).first()
-                    
-                    if not existing_message:
-                        # Create new message
-                        message = Message(
-                            id=str(mention['id']),
-                            timestamp=datetime.fromisoformat(mention['created_at'].replace('Z', '+00:00')),
-                            user=str(mention['author_id']),
-                            text=mention['text'],
-                            status="pending"
-                        )
-                        self.db.add(message)
-                        new_messages.append(message)
-                
-                self.db.commit()
-                return new_messages
-                
+            return new_messages
+
         except Exception as e:
             self.db.rollback()
             raise Exception(f"Failed to fetch mentions: {str(e)}")
+
+    async def _ensure_valid_token(self, user: User):
+        """
+        Verify token and refresh if needed
+        """
+        if not await self.verify_token(user.access_token, user.token_expires_at):
+            if not await self.refresh_token(user):
+                raise Exception("Failed to refresh token")
+
+    async def _fetch_mentions_from_twitter(self, user: User) -> dict:
+        """
+        Get user's mentions from Twitter API
+        """
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://api.twitter.com/2/users/{user.twitter_id}/mentions",
+                headers={"Authorization": f"Bearer {user.access_token}"},
+                params={
+                    "max_results": 100,
+                    "tweet.fields": "created_at,author_id,text,conversation_id"
+                }
+            )
+
+            response_json = response.json()
+            print('response: ', response_json)
+
+            if response.status_code != 200:
+                raise Exception("Failed to fetch mentions", response_json)
+
+            return response_json
+
+    def _process_mentions(self, mentions_data: dict) -> list[Message]:
+        """
+        Check if message already exists, create new message, and save to database
+        """
+        new_messages = []
+
+        for mention in mentions_data.get('data', []):
+            # Check if message already exists
+            existing_message = self.db.query(Message).filter(
+                Message.id == str(mention['id'])
+            ).first()
+
+            if not existing_message:
+                # Create new message
+                message = self._create_message_from_mention(mention)
+                self.db.add(message)
+                new_messages.append(message)
+
+        self.db.commit()
+        return new_messages
+
+    def _create_message_from_mention(self, mention: dict) -> Message:
+        """
+        Convert a raw mention to a Message model object
+        """
+        return Message(
+            id=str(mention['id']),
+            timestamp=datetime.fromisoformat(mention['created_at'].replace('Z', '+00:00')),
+            user=str(mention['author_id']),
+            text=mention['text'],
+            conversation_id=mention.get("conversation_id"),
+            status="pending"
+        )
 
     async def fetch_conversation_context(self, access_token: str, conversation_id: str) -> list[str]:
         """
@@ -156,8 +183,7 @@ class TwitterService:
         except Exception as e:
             print(f"Error in fetch_conversation_context: {e}")
             return []
-     
-    
+
     async def reply_to_tweet(self, access_token: str, tweet_id: str, text: str) -> dict:
         """
         Reply to a tweet using the Twitter API
@@ -174,12 +200,12 @@ class TwitterService:
                         }
                     }
                 )
-                
+
                 if response.status_code != 201:
                     raise Exception("Failed to create tweet")
-                
+
                 return response.json()
-                
+
         except Exception as e:
             raise Exception(f"Failed to reply to tweet: {str(e)}")
 
