@@ -52,7 +52,12 @@ Example Input: "I'm having trouble implementing exponential backoff in Python fo
 Parameter	Internal Reasoning
 Intent	Technical Problem/Support Request (Rate Limiting)
 Value	Provide a link to the exact documentation or a brief, correct code structure(if available).
-Response Draft	Hi! For 429s, use the X-Rate-Limit-Reset header. Implement exponential backoff with a max delay of 30s. The full guide is here: [LINK_TO_DOCS(IF Available)]"""
+Response Draft	Hi! For 429s, use the X-Rate-Limit-Reset header. Implement exponential backoff with a max delay of 30s. The full guide is here: [LINK_TO_DOCS(IF Available)]
+
+Always follow this response format:
+
+Hi, <response message>
+"""
 
             # Use custom prompt if provided, otherwise use default
             prompt = custom_prompt if custom_prompt else default_prompt.format(message_text=message.text)

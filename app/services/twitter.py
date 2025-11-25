@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta
 import httpx
 from app.core.config import settings
-from app.models.message import Message
-from app.models.user import User
+from app.models.message import Message, TwitterUser, TrackedAccount
+from app.models.account import Account  # Changed from User
+from app.models.enums import AccountSyncStatus, MessageStatus
 import uuid
 import base64
 
@@ -30,9 +31,9 @@ class TwitterService:
         except Exception:
             return False
     
-    async def refresh_token(self, user: User) -> bool:
+    async def refresh_token(self, account: Account) -> bool:
         """
-        Refresh the user's Twitter access token
+        Refresh the account's Twitter access token
         """
         try:
             print('refreshing token...')
@@ -44,7 +45,7 @@ class TwitterService:
                     "https://api.twitter.com/2/oauth2/token",
                     headers={"Authorization": auth_header},
                     data={
-                        "refresh_token": user.refresh_token,
+                        "refresh_token": account.refresh_token,
                         "grant_type": "refresh_token"
                     }
                 )
@@ -56,39 +57,43 @@ class TwitterService:
                 
                 token_data = response.json()
                 
-                # Update user's tokens with expiration based on time from twitter
-                user.access_token = token_data['access_token']
-                user.refresh_token = token_data.get('refresh_token', user.refresh_token)
-                user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+                # Update account's tokens with expiration based on time from twitter
+                account.access_token = token_data['access_token']
+                account.refresh_token = token_data.get('refresh_token', account.refresh_token)
+                account.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+                account.sync_status = AccountSyncStatus.ACTIVE
+                account.error_message = None
                 
-                await user.save()
+                await account.save()
                 return True
                 
         except Exception:
             return False
     
-    async def fetch_mentions(self, user: User) -> list[Message]:
+    async def fetch_mentions(self, account: Account) -> list[Message]:
         """
-        Fetch new mentions for a user and store them in the database
+        Fetch new mentions for an account and store them in the database
         """
         try:
             # Verify token and refresh if needed
-            if not await self.verify_token(user.access_token, user.token_expires_at):
-                if not await self.refresh_token(user):
+            if not await self.verify_token(account.access_token, account.token_expires_at):
+                if not await self.refresh_token(account):
                     raise Exception("Failed to refresh token")
 
 
-            print('user.twitter_id: ', user.twitter_id)
-            print('user.access_token: ', user.access_token)
+            print('account.twitter_id: ', account.twitter_id)
+            print('account.access_token: ', account.access_token)
             
             async with httpx.AsyncClient() as client:
-                # Get user's mentions
+                # Get account's mentions with user data
                 response = await client.get(
-                    f"https://api.twitter.com/2/users/{user.twitter_id}/mentions",
-                    headers={"Authorization": f"Bearer {user.access_token}"},
+                    f"https://api.twitter.com/2/users/{account.twitter_id}/mentions",
+                    headers={"Authorization": f"Bearer {account.access_token}"},
                     params={
                         "max_results": 100,
-                        "tweet.fields": "created_at,author_id,text"
+                        "tweet.fields": "created_at,author_id,text",
+                        "expansions": "author_id",
+                        "user.fields": "username,name,profile_image_url"
                     }
                 )
 
@@ -100,21 +105,52 @@ class TwitterService:
                 mentions_data = response.json()
                 new_messages = []
                 
+                # Build user lookup from includes
+                users_data = {u['id']: u for u in mentions_data.get('includes', {}).get('users', [])}
+                
                 for mention in mentions_data.get('data', []):
                     # Check if message already exists
-                    existing_message = await Message.find_one(Message.id == str(mention['id']))
+                    tweet_id = str(mention['id'])
+                    existing_message = await Message.find_one(Message.tweet_id == tweet_id)
                     
                     if not existing_message:
-                        # Create new message
+                        # Get author info
+                        author_id = str(mention['author_id'])
+                        author_data = users_data.get(author_id, {})
+                        
+                        # Create sender object
+                        sender = TwitterUser(
+                            twitter_id=author_id,
+                            username=author_data.get('username', f'user_{author_id}'),
+                            display_name=author_data.get('name'),
+                            profile_image_url=author_data.get('profile_image_url')
+                        )
+                        
+                        # Create sent_to object (tracked account)
+                        sent_to = TrackedAccount(
+                            account_id=account.id,
+                            twitter_id=account.twitter_id,
+                            username=account.twitter_username,
+                            display_name=account.display_name
+                        )
+                        
+                        # Create new message with updated structure
                         message = Message(
-                            id=str(mention['id']),
+                            id=str(uuid.uuid4()),  # Generate new UUID for MongoDB _id
+                            tweet_id=tweet_id,
                             timestamp=datetime.fromisoformat(mention['created_at'].replace('Z', '+00:00')),
-                            user=str(mention['author_id']),
                             text=mention['text'],
-                            status="pending"
+                            sender=sender,
+                            sent_to=sent_to,
+                            status=MessageStatus.PENDING,
+                            user=author_id  # Keep for backward compatibility
                         )
                         await message.insert()
                         new_messages.append(message)
+                
+                # Update account's mention count
+                account.total_mentions_tracked += len(new_messages)
+                await account.save()
                 
                 return new_messages
                 

@@ -1,6 +1,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from app.models.user import User
+from app.models.account import Account  # Changed from User
+from app.models.enums import AccountSyncStatus
 from app.services.twitter import TwitterService
 from app.core.config import settings
 from datetime import datetime, timedelta
@@ -47,33 +48,48 @@ class SchedulerService:
     
     async def poll_mentions(self):
         """
-        Poll for new mentions for all users
+        Poll for new mentions for all ACTIVE accounts
         """
         logger.info("Polling for mentions")
         try:
-            users = await User.find_all().to_list()
-            if not users:
-                logger.info("No users found in database")
+            # Only fetch active accounts
+            accounts = await Account.find(Account.is_active == True).to_list()
+            if not accounts:
+                logger.info("No active accounts found in database")
                 return
                 
             twitter_service = TwitterService()
             
-            for user in users:
+            for account in accounts:
                 try:
                     # Check if token needs refresh
-                    if user.token_expires_at <= datetime.utcnow() + timedelta(minutes=5):
-                        await twitter_service.refresh_token(user)
+                    if account.token_expires_at <= datetime.utcnow() + timedelta(minutes=5):
+                        await twitter_service.refresh_token(account)
                     
                     # Fetch mentions
-                    new_messages = await twitter_service.fetch_mentions(user)
+                    new_messages = await twitter_service.fetch_mentions(account)
                     if new_messages:
-                        logger.info(f"Found {len(new_messages)} new mentions for user {user.twitter_id}")
+                        logger.info(f"Found {len(new_messages)} new mentions for @{account.twitter_username}")
+                    
+                    # Update sync status
+                    account.last_synced_at = datetime.utcnow()
+                    account.sync_status = AccountSyncStatus.ACTIVE
+                    account.error_message = None
+                    await account.save()
                 
                 except Exception as e:
-                    logger.error(f"Error polling mentions for user {user.twitter_id}: {str(e)}")
+                    logger.error(f"Error polling mentions for @{account.twitter_username}: {str(e)}")
+                    
+                    # Update error status
+                    account.sync_status = AccountSyncStatus.ERROR
+                    account.error_message = str(e)[:500]  # Limit error message length
+                    await account.save()
+                    
                     # If we hit rate limit, stop polling for this cycle
                     if "Too Many Requests" in str(e):
                         logger.warning("Rate limit reached, stopping polling for this cycle")
+                        account.sync_status = AccountSyncStatus.RATE_LIMITED
+                        await account.save()
                         break
         
         except Exception as e:
@@ -81,25 +97,38 @@ class SchedulerService:
     
     async def refresh_tokens(self):
         """
-        Refresh tokens for all users
+        Refresh tokens for all active accounts
         """
         logger.info("Refreshing tokens")
         try:
-            users = await User.find_all().to_list()
-            if not users:
-                logger.info("No users found in database")
+            # Only refresh tokens for active accounts
+            accounts = await Account.find(Account.is_active == True).to_list()
+            if not accounts:
+                logger.info("No active accounts found in database")
                 return
                 
             twitter_service = TwitterService()
             
-            for user in users:
+            for account in accounts:
                 try:
-                    if user.token_expires_at <= datetime.utcnow() + timedelta(hours=1):
-                        await twitter_service.refresh_token(user)
-                        logger.info(f"Refreshed token for user {user.twitter_id}")
+                    # Only refresh if token expires within next hour
+                    if account.token_expires_at <= datetime.utcnow() + timedelta(hours=1):
+                        success = await twitter_service.refresh_token(account)
+                        if success:
+                            logger.info(f"Refreshed token for @{account.twitter_username}")
+                            account.sync_status = AccountSyncStatus.ACTIVE
+                            account.error_message = None
+                        else:
+                            logger.error(f"Failed to refresh token for @{account.twitter_username}")
+                            account.sync_status = AccountSyncStatus.TOKEN_EXPIRED
+                            account.error_message = "Failed to refresh token"
+                        await account.save()
                 
                 except Exception as e:
-                    logger.error(f"Error refreshing token for user {user.twitter_id}: {str(e)}")
+                    logger.error(f"Error refreshing token for @{account.twitter_username}: {str(e)}")
+                    account.sync_status = AccountSyncStatus.ERROR
+                    account.error_message = str(e)[:500]
+                    await account.save()
         
         except Exception as e:
             logger.error(f"Error in refresh_tokens: {str(e)}")
