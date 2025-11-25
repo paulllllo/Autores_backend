@@ -9,9 +9,13 @@ echo ""
 cd /Users/apple/Documents/Projects/Autores_backend
 source .venv/bin/activate
 
+# Kill any existing processes on port 8000
+lsof -ti:8000 | xargs kill -9 2>/dev/null || true
+pkill -9 -f "uvicorn app.main:app" 2>/dev/null || true
+
 echo "✅ Virtual environment activated"
 echo "✅ MongoDB configured: Autores database"
-echo "✅ Data migrated: 1 user, 21 messages, 50 OAuth states"
+echo "✅ Multi-account support: 1 account migrated, 22 messages updated"
 echo ""
 echo "Starting application..."
 echo "Access at: http://localhost:8000"

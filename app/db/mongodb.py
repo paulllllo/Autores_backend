@@ -20,14 +20,15 @@ async def connect_to_mongodb():
         mongodb.client = AsyncIOMotorClient(settings.MONGODB_URL)
         
         # Import all document models
-        from app.models.user import User
+        from app.models.account import Account  # Twitter accounts being tracked
         from app.models.message import Message
         from app.models.oauth_state import OAuthState
+        from app.models.app_user import AppUser  # Application users
         
         # Initialize Beanie with document models
         await init_beanie(
             database=mongodb.client[settings.MONGODB_DB_NAME],
-            document_models=[User, Message, OAuthState]
+            document_models=[AppUser, Account, Message, OAuthState]
         )
         
         logger.info("Successfully connected to MongoDB")

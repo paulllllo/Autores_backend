@@ -2,9 +2,17 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from app.core.config import settings
-from app.models.user import User
+from app.core.deps import get_current_user
+from app.models.account import Account  # Changed from User
+from app.models.app_user import AppUser
 from app.models.oauth_state import OAuthState
-from app.schemas.user import UserCreate, UserInDB
+from app.models.enums import AccountSyncStatus
+from app.schemas.user import UserCreate, UserInDB  # Keep for backward compatibility
+from app.schemas.auth import (
+    TwitterAuthorizationResponse,
+    TwitterCallbackResponse,
+    TokenRefreshResponse
+)
 import httpx
 import secrets
 import base64
@@ -13,6 +21,7 @@ import uuid
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 import asyncio
+from typing import Optional
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
@@ -28,20 +37,24 @@ def generate_code_challenge(code_verifier):
     code_challenge = base64.urlsafe_b64encode(sha256_hash).decode('utf-8').rstrip('=')
     return code_challenge
 
-@router.get("/twitter/authorize")
-async def twitter_authorize():
+@router.post("/twitter/authorize", response_model=TwitterAuthorizationResponse)
+async def twitter_authorize(current_user: AppUser = Depends(get_current_user)):
     """
-    Initiate Twitter OAuth 2.0 flow with PKCE
+    Generate Twitter OAuth 2.0 authorization URL with PKCE
+    Requires JWT authentication - links Twitter account to current user
+    
+    Returns JSON with authorization_url that frontend should redirect user to
     """
     # Generate PKCE values
     code_verifier = generate_code_verifier()
     code_challenge = generate_code_challenge(code_verifier)
     
-    # Generate and store state
+    # Generate and store state with app user ID
     state = secrets.token_urlsafe(16)
     oauth_state = OAuthState(
         state=state,
         code_verifier=code_verifier,
+        app_user_id=current_user.id,  # Link to current user
         created_at=datetime.utcnow()
     )
     await oauth_state.insert()
@@ -59,15 +72,19 @@ async def twitter_authorize():
     
     auth_url = f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}"
     
-    return RedirectResponse(auth_url)
+    return TwitterAuthorizationResponse(
+        authorization_url=auth_url,
+        message="Redirect user to this URL to authorize their Twitter account"
+    )
 
-@router.get("/twitter/callback")
+@router.get("/twitter/callback", response_model=TwitterCallbackResponse)
 async def twitter_callback(
     code: str,
     state: str
 ):
     """
     Handle Twitter OAuth 2.0 callback
+    Exchanges authorization code for access tokens and creates/updates Twitter account
     """
 
     print('called back...')
@@ -137,33 +154,62 @@ async def twitter_callback(
 
             print('user_data: ', user_data)
             
-            # Create or update user in database
-            db_user = await User.find_one(User.twitter_id == str(user_data['data']['id']))
-            if not db_user:
-                db_user = User(
+            # Extract user information
+            twitter_id = str(user_data['data']['id'])
+            twitter_username = user_data['data'].get('username', '')
+            display_name = user_data['data'].get('name', '')
+            profile_image_url = user_data['data'].get('profile_image_url')
+            
+            # Create or update account in database
+            account = await Account.find_one(Account.twitter_id == twitter_id)
+            if not account:
+                # New account - link to app user from OAuth state
+                account = Account(
                     id=str(uuid.uuid4()),
-                    twitter_id=str(user_data['data']['id']),
+                    twitter_id=twitter_id,
+                    twitter_username=twitter_username,
+                    display_name=display_name,
+                    profile_image_url=profile_image_url,
                     access_token=token_data['access_token'],
                     refresh_token=token_data.get('refresh_token'),
-                    token_expires_at=datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+                    token_expires_at=datetime.utcnow() + timedelta(seconds=token_data['expires_in']),
+                    is_active=True,
+                    sync_status=AccountSyncStatus.ACTIVE,
+                    added_by=oauth_state.app_user_id,  # Link to app user
+                    added_at=datetime.utcnow()
                 )
-                await db_user.insert()
+                await account.insert()
+                message = f"Successfully added Twitter account @{twitter_username} for tracking"
             else:
-                db_user.access_token = token_data.get('access_token')
-                db_user.refresh_token = token_data.get('refresh_token')
-                db_user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
-                await db_user.save()
+                # Reauthorization - update tokens and info
+                account.access_token = token_data.get('access_token')
+                account.refresh_token = token_data.get('refresh_token')
+                account.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+                account.twitter_username = twitter_username
+                account.display_name = display_name
+                account.profile_image_url = profile_image_url
+                account.sync_status = AccountSyncStatus.ACTIVE
+                account.error_message = None
+                account.updated_at = datetime.utcnow()
+                # Update added_by if it's not set
+                if not account.added_by and oauth_state.app_user_id:
+                    account.added_by = oauth_state.app_user_id
+                await account.save()
+                message = f"Successfully reauthorized Twitter account @{twitter_username}"
             
             # Clean up used state
             await oauth_state.delete()
             
-            return {
-                "message": "Successfully authenticated with Twitter",
-                "user": {
-                    "id": db_user.id,
-                    "twitter_id": db_user.twitter_id
+            return TwitterCallbackResponse(
+                message=message,
+                account={
+                    "id": account.id,
+                    "twitter_id": account.twitter_id,
+                    "twitter_username": account.twitter_username,
+                    "display_name": account.display_name,
+                    "is_active": account.is_active
                 }
-            }
+            )
             
     except Exception as e:
         print('Error in twitter_callback:', str(e))
@@ -192,19 +238,20 @@ async def get_user_info_with_retry(client, token, max_retries=3):
                 raise e
             await asyncio.sleep(2 ** attempt)
 
-@router.post("/refresh")
+@router.post("/refresh", response_model=TokenRefreshResponse)
 async def refresh_token(
-    user_id: str
+    account_id: str
 ):
     """
-    Refresh Twitter access token
+    Refresh Twitter access token for an account
+    Returns new token expiration time
     """
     try:
-        user = await User.find_one(User.id == user_id)
-        if not user or not user.refresh_token:
+        account = await Account.find_one(Account.id == account_id)
+        if not account or not account.refresh_token:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found or no refresh token available"
+                detail="Account not found or no refresh token available"
             )
         
         async with httpx.AsyncClient() as client:
@@ -228,17 +275,21 @@ async def refresh_token(
             
             token_data = response.json()
             
-            # Update user's tokens
-            user.access_token = token_data['access_token']
-            user.refresh_token = token_data.get('refresh_token', user.refresh_token)
-            user.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+            # Update account's tokens
+            account.access_token = token_data['access_token']
+            account.refresh_token = token_data.get('refresh_token', account.refresh_token)
+            account.token_expires_at = datetime.utcnow() + timedelta(seconds=token_data['expires_in'])
+            account.sync_status = AccountSyncStatus.ACTIVE
+            account.error_message = None
+            account.updated_at = datetime.utcnow()
             
-            await user.save()
+            await account.save()
             
-            return {
-                "message": "Successfully refreshed token",
-                "expires_at": user.token_expires_at
-            }
+            return TokenRefreshResponse(
+                message="Successfully refreshed token",
+                expires_at=account.token_expires_at.isoformat(),
+                account_username=account.twitter_username
+            )
             
     except Exception as e:
         raise HTTPException(
