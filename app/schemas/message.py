@@ -1,14 +1,24 @@
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel
+from app.models.enums import MessageStatus
+# Import the embedded models from the Message model to avoid duplication
+from app.models.message import TwitterUser, TrackedAccount
+
+
+# Keep these aliases for backward compatibility
+TwitterUserInfo = TwitterUser
+TrackedAccountInfo = TrackedAccount
 
 
 class MessageBase(BaseModel):
     id: str
+    tweet_id: str
     timestamp: datetime
-    user: str
     text: str
-    status: str = "pending"
+    sender: TwitterUser  # Who sent the mention
+    sent_to: TrackedAccount  # Which account received it
+    status: MessageStatus  # Enum for status
     public_response: Optional[str] = None
     dm_response: Optional[str] = None
     credits_used: int = 0
@@ -20,7 +30,7 @@ class MessageCreate(MessageBase):
 
 
 class MessageUpdate(BaseModel):
-    status: Optional[str] = None
+    status: Optional[MessageStatus] = None
     public_response: Optional[str] = None
     dm_response: Optional[str] = None
     credits_used: Optional[int] = None
@@ -33,6 +43,7 @@ class MessageInDB(MessageBase):
 
     class Config:
         from_attributes = True
+        use_enum_values = True  # Serialize enum as string
 
 
 class FetchMessagesResponse(BaseModel):

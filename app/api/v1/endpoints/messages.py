@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import List, Optional
 from app.core.config import settings
 from app.models.message import Message
-from app.models.user import User
+from app.models.account import Account  # Changed from User
+from app.models.enums import MessageStatus
 from app.schemas.message import MessageCreate, MessageUpdate, MessageInDB, FetchMessagesResponse, GenerateResponseRequest, GenerateResponseResponse
 from app.services.twitter import TwitterService
 from app.services.ai_service import AIService
@@ -14,12 +15,27 @@ router = APIRouter()
 @router.get("/", response_model=List[MessageInDB])
 async def get_messages(
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    account_id: Optional[str] = Query(None, description="Filter by account ID"),
+    status: Optional[MessageStatus] = Query(None, description="Filter by message status")
 ):
     """
-    Get all messages from the database, sorted by timestamp (newest first)
+    Get messages from the database, sorted by timestamp (newest first)
+    Optionally filter by account ID and status
     """
-    messages = await Message.find().sort(-Message.timestamp).skip(skip).limit(limit).to_list()
+    # Build query
+    query_filter = {}
+    if account_id:
+        query_filter["sent_to.account_id"] = account_id
+    if status:
+        query_filter["status"] = status
+    
+    # Fetch messages
+    if query_filter:
+        messages = await Message.find(query_filter).sort(-Message.timestamp).skip(skip).limit(limit).to_list()
+    else:
+        messages = await Message.find().sort(-Message.timestamp).skip(skip).limit(limit).to_list()
+    
     return messages
 
 
@@ -55,30 +71,30 @@ async def reply_to_message(
         )
     
     try:
-        # Get user's access token
-        user = await User.find_one()  # In a real app, you'd get the specific user
-        if not user:
+        # Get the account that received this mention
+        account = await Account.find_one(Account.id == message.sent_to.account_id)
+        if not account:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not authenticated"
+                detail="Account not found for this message"
             )
         
         # Create Twitter service
         twitter_service = TwitterService()
         
         # Verify token and refresh if needed
-        if not await twitter_service.verify_token(user.access_token, user.token_expires_at):
-            if not await twitter_service.refresh_token(user):
+        if not await twitter_service.verify_token(account.access_token, account.token_expires_at):
+            if not await twitter_service.refresh_token(account):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Failed to refresh token"
                 )
         
-        # Reply to the tweet
-        reply = await twitter_service.reply_to_tweet(user.access_token, message_id, response)
+        # Reply to the tweet using tweet_id
+        reply = await twitter_service.reply_to_tweet(account.access_token, message.tweet_id, response)
         
         # Update message in database
-        message.status = "replied"
+        message.status = MessageStatus.REPLIED
         message.public_response = response
         await message.save()
         
@@ -132,20 +148,20 @@ async def reply_to_dm(
         )
     
     try:
-        # Get user's access token
-        user = await User.find_one()  # In a real app, you'd get the specific user
-        if not user:
+        # Get the account that received this mention
+        account = await Account.find_one(Account.id == message.sent_to.account_id)
+        if not account:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not authenticated"
+                detail="Account not found for this message"
             )
         
         # Create Twitter service
         twitter_service = TwitterService()
         
         # Verify token and refresh if needed
-        if not await twitter_service.verify_token(user.access_token, user.token_expires_at):
-            if not await twitter_service.refresh_token(user):
+        if not await twitter_service.verify_token(account.access_token, account.token_expires_at):
+            if not await twitter_service.refresh_token(account):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Failed to refresh token"
@@ -155,8 +171,8 @@ async def reply_to_dm(
         
         # Send DM to the user who sent the original message
         dm_response = await twitter_service.send_dm(
-            user.access_token,
-            message.user,  # This is the author_id from the original tweet
+            account.access_token,
+            message.sender.twitter_id,  # Send to the sender of the mention
             response
         )
 
@@ -194,29 +210,51 @@ async def delete_message(
 
 
 @router.post("/fetch-new", response_model=FetchMessagesResponse)
-async def fetch_new_messages():
+async def fetch_new_messages(
+    account_id: Optional[str] = Query(None, description="Fetch for specific account only")
+):
     """
-    Fetch new mentions from Twitter for the current user
+    Fetch new mentions from Twitter
+    If account_id is provided, fetch only for that account
+    Otherwise, fetch for all active accounts
     """
     try:
-        # Get the current user
-        user = await User.find_one()  # In a real app, you'd get the specific authenticated user
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not authenticated"
-            )
-        
         # Create Twitter service
         twitter_service = TwitterService()
+        all_new_messages = []
         
-        # Fetch new mentions
-        new_messages = await twitter_service.fetch_mentions(user)
+        if account_id:
+            # Fetch for specific account
+            account = await Account.find_one(Account.id == account_id)
+            if not account:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Account not found"
+                )
+            
+            new_messages = await twitter_service.fetch_mentions(account)
+            all_new_messages.extend(new_messages)
+        else:
+            # Fetch for all active accounts
+            accounts = await Account.find(Account.is_active == True).to_list()
+            if not accounts:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No active accounts found"
+                )
+            
+            for account in accounts:
+                try:
+                    new_messages = await twitter_service.fetch_mentions(account)
+                    all_new_messages.extend(new_messages)
+                except Exception as e:
+                    # Log error but continue with other accounts
+                    print(f"Error fetching mentions for @{account.twitter_username}: {e}")
         
         return FetchMessagesResponse(
-            message=f"Successfully fetched {len(new_messages)} new messages",
-            new_messages_count=len(new_messages),
-            messages=new_messages
+            message=f"Successfully fetched {len(all_new_messages)} new messages",
+            new_messages_count=len(all_new_messages),
+            messages=all_new_messages
         )
         
     except Exception as e:
